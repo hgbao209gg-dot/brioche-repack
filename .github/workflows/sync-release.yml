@@ -1,0 +1,79 @@
+name: Sync and Repack Release
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repack:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch latest upstream release info
+        id: get_release
+        run: |
+          RELEASE_JSON=$(curl -s https://api.github.com/repos/brioche-dev/brioche/releases/latest)
+          TAG_NAME=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
+          
+          echo "Latest tag found: $TAG_NAME"
+          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+
+          URL_X86=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name == "brioche-x86_64-linux.tar.xz") | .browser_download_url')
+          URL_ARM=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name == "brioche-aarch64-linux.tar.xz") | .browser_download_url')
+
+          if [ -z "$URL_X86" ] || [ -z "$URL_ARM" ]; then
+            echo "Error: Required tar.xz assets not found in the upstream release."
+            exit 1
+          fi
+
+          echo "url_x86=$URL_X86" >> $GITHUB_OUTPUT
+          echo "url_arm=$URL_ARM" >> $GITHUB_OUTPUT
+
+      - name: Check if tag already exists
+        id: check_tag
+        run: |
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ steps.get_release.outputs.tag_name }})
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "Tag ${{ steps.get_release.outputs.tag_name }} already exists. Skipping."
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "New tag detected. Proceeding with repack."
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download and repack to tar.gz
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          mkdir workspace && cd workspace
+          
+          curl -L -O "${{ steps.get_release.outputs.url_x86 }}"
+          curl -L -O "${{ steps.get_release.outputs.url_arm }}"
+
+          xz -d brioche-x86_64-linux.tar.xz
+          tar -czf brioche-x86_64-linux.tar.gz brioche-x86_64-linux.tar
+          
+          xz -d brioche-aarch64-linux.tar.xz
+          tar -czf brioche-aarch64-linux.tar.gz brioche-aarch64-linux.tar
+
+          rm *.tar
+
+      - name: Create GitHub Release and upload assets
+        if: steps.check_tag.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.get_release.outputs.tag_name }}
+          name: Release ${{ steps.get_release.outputs.tag_name }}
+          body: |
+            Automated repack from the official upstream release.
+            Upstream source: https://github.com/brioche-dev/brioche/releases/tag/${{ steps.get_release.outputs.tag_name }}
+          draft: false
+          prerelease: false
+          files: |
+            workspace/brioche-x86_64-linux.tar.gz
+            workspace/brioche-aarch64-linux.tar.gz
